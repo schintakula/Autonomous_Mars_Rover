@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tabletop Traverse</title>
+<meta name="description" content="Plan a rover route across an iPhone LiDAR scan of a tabletop, then drive it in a MuJoCo physics simulation.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: rover-ops console. Stage (hazard map / 3D sim) on the left, instrument panel on the right; stacks on phones. */
+:root{
+  --bg:#EDF0F3; --surface:#FFFFFF; --ink:#17202A; --muted:#566371; --line:#D3DAE2; --soft:#F5F7F9;
+  --accent:#2343C4; --accent-ink:#FFFFFF; --good:#2F8A55; --bad:#C5402C; --warn:#B7791F;
+  --c-free:#DCE4D8; --c-climb:#E3AC3C; --c-obst:#C5402C; --c-margin:#EDC6BC; --c-void:#2B343E;
+  --viewport:#0F151C; --viewport-ink:#E2E8EE;
+  --f-display:"Barlow Semi Condensed","Arial Narrow",Arial,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0F141A; --surface:#161D25; --ink:#E2E8EE; --muted:#93A1AF; --line:#2A3440; --soft:#1B232D;
+    --accent:#86A2FF; --accent-ink:#0F141A; --good:#5BC285; --bad:#E0604A; --warn:#E0A84A;
+    --c-free:#2C3A30; --c-climb:#C99030; --c-obst:#E0604A; --c-margin:#5C3029; --c-void:#06090C;
+    --viewport:#0A0F14;
+    color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{background:var(--bg);color:var(--ink);margin:0}
+body{font-family:var(--f-body);font-size:14px;line-height:1.5;padding-inline:20px;padding-block:20px 32px}
+.app{max-width:1320px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+header.top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:8px 24px;border-bottom:1px solid var(--line);padding-bottom:14px}
+.eyebrow{font-family:var(--f-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 2px}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(28px,4vw,42px);line-height:1;letter-spacing:-.01em;margin:0;text-wrap:balance}
+.lede{margin:6px 0 0;color:var(--muted);max-width:62ch}
+.scaninfo{font-family:var(--f-mono);font-size:12px;color:var(--muted);text-align:right;min-width:0}
+.scaninfo b{color:var(--ink);font-weight:500}
+
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:20px;align-items:start}
+@media (max-width:940px){.layout{grid-template-columns:minmax(0,1fr)}.scaninfo{text-align:left}}
+
+.stage{display:flex;flex-direction:column;gap:10px;min-width:0}
+.stagebar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
+.tabs{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--surface)}
+.tabs button{font:500 13.5px var(--f-body);border:0;background:transparent;color:var(--muted);padding:7px 14px;cursor:pointer}
+.tabs button[aria-selected="true"]{background:var(--ink);color:var(--bg)}
+.status{font-family:var(--f-mono);font-size:12.5px;display:flex;align-items:center;gap:8px;min-width:0}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+.status.ok .dot{background:var(--good)} .status.bad .dot{background:var(--bad)}
+.status.busy .dot{background:var(--accent);animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.3}}
+
+.view{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
+.mapwrap{display:flex;justify-content:center}
+#map{display:block;cursor:crosshair;touch-action:none;max-width:100%;border-radius:3px}
+.readout{font-family:var(--f-mono);font-size:12px;color:var(--muted);min-height:18px;font-variant-numeric:tabular-nums;margin-top:8px}
+.hintline{font-size:13px;color:var(--muted);margin:2px 0 0}
+.hintline strong{color:var(--ink);font-weight:600}
+
+.three{position:relative;background:var(--viewport);border-radius:6px;overflow:hidden;height:min(62vh,600px);min-height:300px}
+.three canvas{display:block;width:100%;height:100%}
+.hud{position:absolute;left:12px;top:10px;right:12px;display:flex;flex-wrap:wrap;gap:6px 14px;font-family:var(--f-mono);font-size:12px;color:var(--viewport-ink);pointer-events:none;font-variant-numeric:tabular-nums}
+.hud span{background:rgba(10,14,20,.7);padding:3px 8px;border-radius:4px}
+.pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--f-mono);font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid currentColor}
+.pill.good{color:var(--good)} .pill.bad{color:var(--bad)} .pill.warn{color:var(--warn)} .pill.idle{color:var(--muted)}
+.hud .pill{background:rgba(10,14,20,.7)}
+.hud .pill.idle{color:var(--viewport-ink)}
+.hud .pill.good{color:#5BC285} .hud .pill.bad{color:#F07A62} .hud .pill.warn{color:#E0A84A}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:var(--viewport-ink);font-size:14px;background:rgba(10,14,20,.55)}
+.playbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:10px}
+.playbar input[type=range]{flex:1 1 200px;min-width:0;accent-color:var(--accent)}
+.playbar .time{font-family:var(--f-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:92px;text-align:right}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{font:500 12.5px var(--f-body);border:0;background:var(--soft);color:var(--muted);padding:5px 10px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+
+.panel{display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-width:0}
+.panel section{padding:14px 16px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+.panel section:first-child{border-top:0}
+.panel h2{font-family:var(--f-display);font-weight:600;font-size:13px;letter-spacing:.08em;text-transform:uppercase;margin:0}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+.btn{font:500 13px var(--f-body);border:1px solid var(--line);background:var(--soft);color:var(--ink);padding:7px 12px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.big{font-size:15px;padding:11px 14px;width:100%;font-weight:600}
+.btn:disabled{opacity:.5;cursor:default}
+.file{position:relative;overflow:hidden}
+.file input{position:absolute;inset:0;opacity:0;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,.file:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.field{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px}
+select{font:13px var(--f-body);color:var(--ink);background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+.ctl{display:flex;flex-direction:column;gap:3px}
+.ctl label{display:flex;justify-content:space-between;gap:8px;font-size:13px;font-weight:500}
+.ctl output{font-family:var(--f-mono);font-weight:400;font-variant-numeric:tabular-nums;color:var(--accent)}
+.ctl input[type=range]{width:100%;accent-color:var(--accent)}
+.ctl .hint{margin:0;font-size:12px;color:var(--muted)}
+.err{font-size:12.5px;color:var(--bad);margin:0}
+dl.stats{display:grid;grid-template-columns:1fr auto;gap:5px 12px;margin:0;font-size:13px}
+dl.stats dt{color:var(--muted)}
+dl.stats dd{margin:0;font-family:var(--f-mono);font-variant-numeric:tabular-nums;text-align:right}
+.note{font-size:12.5px;color:var(--muted);margin:0}
+.resulthead{display:flex;align-items:center;justify-content:space-between;gap:8px}
+ul.legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+ul.legend li{display:grid;grid-template-columns:14px 1fr;gap:9px;align-items:start;font-size:12.5px}
+ul.legend i{width:14px;height:14px;border-radius:3px;margin-top:2px;border:1px solid var(--line)}
+ul.legend b{font-weight:600} ul.legend span{color:var(--muted)}
+details{font-size:13px} summary{cursor:pointer;font-weight:500}
+details ol{margin:8px 0 0;padding-left:18px;color:var(--muted);display:flex;flex-direction:column;gap:5px}
+footer{font-size:12.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;border-top:1px solid var(--line);padding-top:12px}
+footer a{color:var(--accent)}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div>
+      <p class="eyebrow">Sundai · Autonomous Spacecraft Hack</p>
+      <h1>Tabletop Traverse</h1>
+      <p class="lede">An iPhone LiDAR scan of a tabletop becomes rover terrain. The planner maps hazards and finds a safe route from A to B, then a MuJoCo physics sim drives a rover along it.</p>
+    </div>
+    <div class="scaninfo" id="scaninfo">Loading scan…</div>
+  </header>
+
+  <div class="layout">
+    <div class="stage">
+      <div class="stagebar">
+        <div class="tabs" role="tablist" aria-label="View">
+          <button type="button" role="tab" id="tab3d" aria-selected="true" aria-controls="view3d">3D simulation</button>
+          <button type="button" role="tab" id="tabMap" aria-selected="false" aria-controls="viewMap">Hazard map</button>
+        </div>
+        <div class="status" id="status" role="status"><span class="dot"></span><span id="statusText">Loading…</span></div>
+      </div>
+
+      <div class="view" id="view3d" role="tabpanel" aria-labelledby="tab3d">
+        <div class="three" id="three">
+          <div class="hud" id="hud" hidden>
+            <span id="hudT">t 0.0 s</span><span id="hudD">driven 0 cm</span><span id="hudTilt">tilt 0°</span><span class="pill idle" id="hudStatus">driving</span>
+          </div>
+          <div class="overlay" id="overlay">Running the first simulation…</div>
+        </div>
+        <div class="playbar">
+          <button class="btn" type="button" id="playBtn" disabled>Play</button>
+          <input type="range" id="scrub" min="0" max="0" step="1" value="0" aria-label="Timeline" disabled>
+          <span class="time" id="timeLbl">0.0 / 0.0 s</span>
+          <div class="seg" role="group" aria-label="Playback speed">
+            <button type="button" data-speed="1" aria-pressed="true">1×</button><button type="button" data-speed="2" aria-pressed="false">2×</button><button type="button" data-speed="4" aria-pressed="false">4×</button>
+          </div>
+          <div class="seg" role="group" aria-label="Camera">
+            <button type="button" id="camOrbit" aria-pressed="true">Orbit</button><button type="button" id="camChase" aria-pressed="false">Chase</button>
+          </div>
+        </div>
+        <p class="hintline" style="margin-top:8px">Drag to orbit, scroll to zoom. Blue dots are the planned route; orange is where the rover actually drove.</p>
+      </div>
+
+      <div class="view" id="viewMap" role="tabpanel" aria-labelledby="tabMap" hidden>
+        <div class="mapwrap"><canvas id="map" aria-label="Hazard map. Click to set start A, then goal B."></canvas></div>
+        <div class="readout" id="hover">Hover the map to read height and terrain class.</div>
+        <p class="hintline"><strong>Click</strong> to set A, click again to set B. A third click starts over.</p>
+      </div>
+    </div>
+
+    <aside class="panel" aria-label="Controls">
+      <section>
+        <h2>Scan</h2>
+        <div class="seg" role="group" aria-label="Built-in scans" style="align-self:flex-start">
+          <button type="button" id="bOur" aria-pressed="true">Our table</button><button type="button" id="bSample" aria-pressed="false">Synthetic sample</button>
+        </div>
+        <div class="row">
+          <label class="btn file">Upload your scan (.ply)<input type="file" id="file" accept=".ply,.obj,.xyz,.txt,.csv,.pts"></label>
+        </div>
+        <div class="field"><label for="units">Scan units</label>
+          <select id="units"><option value="auto">Auto-detect</option><option value="m">Meters (iPhone)</option><option value="cm">Centimeters</option><option value="mm">Millimeters</option></select></div>
+        <div class="field"><span>Objects showing as pits?</span><button class="btn" type="button" id="flipBtn">Flip up</button></div>
+        <p class="err" id="err" hidden></p>
+      </section>
+
+      <section>
+        <h2>Rover</h2>
+        <div class="ctl"><label for="step">Max climbable step <output id="stepO"></output></label>
+          <input type="range" id="step" min="0.5" max="6" step="0.1" value="2.5">
+          <p class="hint">Anything taller is an obstacle.</p></div>
+        <div class="ctl"><label for="tilt">Max rover tilt <output id="tiltO"></output></label>
+          <input type="range" id="tilt" min="5" max="60" step="1" value="25"></div>
+        <div class="ctl"><label for="radius">Rover radius <output id="radiusO"></output></label>
+          <input type="range" id="radius" min="4" max="10" step="0.5" value="6">
+          <p class="hint">Obstacles and edges grow by this much. Also sizes the simulated rover.</p></div>
+        <div class="ctl"><label for="penalty">Avoid small objects <output id="penaltyO"></output></label>
+          <input type="range" id="penalty" min="0" max="10" step="0.5" value="4">
+          <p class="hint">0 drives straight over them. Higher detours around.</p></div>
+        <div class="ctl"><label for="speed">Top speed <output id="speedO"></output></label>
+          <input type="range" id="speed" min="3" max="15" step="1" value="8"></div>
+      </section>
+
+      <section>
+        <h2>Route</h2>
+        <dl class="stats">
+          <dt>Start A</dt><dd id="rA">–</dd>
+          <dt>Goal B</dt><dd id="rB">–</dd>
+          <dt>Route length</dt><dd id="rLen">–</dd>
+          <dt>Over small objects</dt><dd id="rClimb">–</dd>
+          <dt>Highest point crossed</dt><dd id="rMax">–</dd>
+        </dl>
+        <p class="note" id="snapNote" hidden></p>
+        <div class="row"><button class="btn" type="button" id="autoBtn">Auto-pick A and B</button><button class="btn" type="button" id="swapBtn">Swap</button></div>
+        <button class="btn primary big" type="button" id="simBtn">Simulate in MuJoCo</button>
+        <p class="note" id="staleNote" hidden>Settings changed since the last run.</p>
+      </section>
+
+      <section>
+        <div class="resulthead"><h2>Last run</h2><span class="pill idle" id="resPill">not run</span></div>
+        <dl class="stats">
+          <dt>Sim time</dt><dd id="sT">–</dd>
+          <dt>Driven / planned</dt><dd id="sD">–</dd>
+          <dt>Max tilt</dt><dd id="sTilt">–</dd>
+          <dt>Max tracking error</dt><dd id="sCte">–</dd>
+        </dl>
+      </section>
+
+      <section>
+        <h2>Legend</h2>
+        <ul class="legend">
+          <li><i style="background:var(--c-free)"></i><div><b>Open surface.</b> <span>Flat, drive freely.</span></div></li>
+          <li><i style="background:var(--c-climb)"></i><div><b>Small object.</b> <span>Below the step limit. Drivable at a cost.</span></div></li>
+          <li><i style="background:var(--c-obst)"></i><div><b>Obstacle.</b> <span>Too tall or too steep.</span></div></li>
+          <li><i style="background:var(--c-margin)"></i><div><b>Keep-out margin.</b> <span>Within one rover radius of an obstacle or edge.</span></div></li>
+          <li><i style="background:var(--c-void)"></i><div><b>Off surface.</b> <span>No scan data, or past the table edge.</span></div></li>
+        </ul>
+      </section>
+
+      <section>
+        <details>
+          <summary>How it works</summary>
+          <ol>
+            <li>RANSAC finds the table plane in the point cloud and levels it.</li>
+            <li>Points are binned into a 1 cm height grid; a median filter removes LiDAR spikes.</li>
+            <li>Each cell is classified by step height, rover tilt across its footprint, and roughness. Obstacles and edges are inflated by the rover radius.</li>
+            <li>A* finds the cheapest safe route on the cost grid.</li>
+            <li>The grid becomes a MuJoCo heightfield. A 4-wheel skid-steer rover follows the route with pure pursuit, under contact physics.</li>
+          </ol>
+        </details>
+        <details>
+          <summary>Scanning your own table</summary>
+          <ol>
+            <li>Use Scaniverse, Polycam or 3D Scanner App in LiDAR mode, 30–50 cm above the table.</li>
+            <li>Cover the whole tabletop slowly, including the edges.</li>
+            <li>Export a point cloud as PLY and upload it here.</li>
+          </ol>
+        </details>
+      </section>
+    </aside>
+  </div>
+  <footer>
+    <span>Built at <a href="https://www.sundai.club" target="_blank" rel="noopener">Sundai</a> · Autonomous Spacecraft Hack</span>
+    <span>MuJoCo physics · three.js · iPhone LiDAR</span>
+  </footer>
+</div>
+
+<script src="/static/vendor/three.min.js"></script>
+<script src="/static/vendor/OrbitControls.js"></script>
+<script>
+(function(){
+'use strict';
+const $=id=>document.getElementById(id);
+const VOID=0,FREE=1,CLIMB=2,OBST=3,MARGIN=4;
+const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const P={step:2.5,tilt:25,radius:6,penalty:4,speed:8};
+const S={scanId:null,builtin:'our_table',file:null,units:'auto',flip:false,
+  map:null,plan:null,A:null,B:null,sim:null,simKey:null,view:'3d',seq:0,scale:1,busy:false};
+
+/* ---------- api ---------- */
+async function api(path,body,isForm){
+  const res=await fetch(path,{method:'POST',body:isForm?body:JSON.stringify(body),headers:isForm?{}:{'Content-Type':'application/json'}});
+  let data=null;try{data=await res.json();}catch(e){}
+  if(!res.ok)throw new Error((data&&data.detail&&(typeof data.detail==='string'?data.detail:'Invalid request.'))||('Server error '+res.status+'.'));
+  return data;
+}
+function setStatus(text,kind){const s=$('status');s.className='status'+(kind?' '+kind:'');$('statusText').textContent=text;}
+function showErr(msg){const e=$('err');e.textContent=msg||'';e.hidden=!msg;}
+function paramsBody(){return{step:P.step,tilt:P.tilt,radius:P.radius,penalty:P.penalty,cell:1};}
+function cm(v){return v.toFixed(1)+' cm';}
+
+/* ---------- scan ---------- */
+async function loadScan(){
+  showErr('');setStatus('Fitting the table plane…','busy');
+  const fd=new FormData();
+  if(S.file)fd.append('file',S.file);else fd.append('builtin',S.builtin);
+  fd.append('units',S.units);fd.append('flip',S.flip?'true':'false');
+  try{
+    const r=await api('/api/scan',fd,true);
+    S.scanId=r.scan_id;S.A=S.B=null;S.sim=null;
+    $('scaninfo').innerHTML='<b>'+esc(r.name)+'</b><br>'+r.points.toLocaleString()+' points · plane fit '+Math.round(r.plane_fit*100)+'%<br>'+r.size_cm[0].toFixed(0)+' × '+r.size_cm[1].toFixed(0)+' cm surface';
+    await refreshMap();
+    await simulate();
+  }catch(e){showErr(e.message);setStatus('Could not load that scan.','bad');}
+}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+/* ---------- map ---------- */
+async function refreshMap(){
+  if(!S.scanId)return;
+  const my=++S.seq;
+  setStatus('Planning…','busy');
+  try{
+    const body={scan_id:S.scanId,params:paramsBody()};
+    if(S.A&&S.B){body.a=S.A;body.b=S.B;}
+    const r=await api('/api/map',body);
+    if(my!==S.seq)return;
+    applyMap(r);
+  }catch(e){if(my===S.seq){showErr(e.message);setStatus('Planning failed.','bad');}}
+}
+function applyMap(r){
+  S.map={gw:r.gw,gh:r.gh,cs:r.cell_cm,H:Float32Array.from(r.heights_mm),C:Uint8Array.from(r.classes)};
+  S.plan=r.plan;
+  if(r.plan.a_cm){S.A=r.plan.a_cm;S.B=r.plan.b_cm;}
+  updateRoutePanel();drawMap();
+  markStale();
+  if(r.plan.error)setStatus(r.plan.error,'bad');else setStatus('Safe route found · '+r.plan.length_cm.toFixed(1)+' cm','ok');
+}
+function updateRoutePanel(){
+  const p=S.plan||{};
+  $('rA').textContent=S.A?'('+S.A[0].toFixed(1)+', '+S.A[1].toFixed(1)+')':'–';
+  $('rB').textContent=S.B?'('+S.B[0].toFixed(1)+', '+S.B[1].toFixed(1)+')':'click map';
+  $('rLen').textContent=p.length_cm!=null?cm(p.length_cm):'–';
+  $('rClimb').textContent=p.climb_cm!=null?cm(p.climb_cm):'–';
+  $('rMax').textContent=p.max_height_cm!=null?cm(p.max_height_cm):'–';
+  const notes=[];if(p.a_moved_cm>0)notes.push('A moved '+p.a_moved_cm+' cm to the nearest safe cell.');if(p.b_moved_cm>0)notes.push('B moved '+p.b_moved_cm+' cm to the nearest safe cell.');
+  $('snapNote').textContent=notes.join(' ');$('snapNote').hidden=!notes.length;
+  $('simBtn').disabled=!p.path||S.busy;
+}
+function simKey(){return JSON.stringify([S.scanId,paramsBody(),P.speed,S.A,S.B]);}
+function markStale(){$('staleNote').hidden=!(S.sim&&S.simKey!==simKey());}
+
+function tok(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function hexRGB(h){h=h.replace('#','');const n=parseInt(h,16);return[(n>>16)&255,(n>>8)&255,n&255];}
+function drawMap(){
+  const m=S.map;if(!m||S.view!=='map')return;
+  const{gw,gh,H,C}=m;
+  const cols=[tok('--c-void'),tok('--c-free'),tok('--c-climb'),tok('--c-obst'),tok('--c-margin')].map(hexRGB);
+  const off=document.createElement('canvas');off.width=gw;off.height=gh;
+  const cx=off.getContext('2d'),img=cx.createImageData(gw,gh),d=img.data;
+  const hv=(x,y)=>{x=Math.max(0,Math.min(gw-1,x));y=Math.max(0,Math.min(gh-1,y));const v=H[y*gw+x];return v<0?0:Math.min(v,250);};
+  const L=[-0.5,0.5,0.7],Ln=Math.hypot(...L);
+  for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){
+    const i=y*gw+x,o=((gh-1-y)*gw+x)*4;let c=cols[C[i]];
+    if(C[i]!==VOID){const gx=(hv(x+1,y)-hv(x-1,y))/(2*m.cs*10),gy=(hv(x,y+1)-hv(x,y-1))/(2*m.cs*10);const nl=Math.hypot(gx,gy,1);const sh=0.8+0.3*Math.max(0,(-gx*L[0]-gy*L[1]+L[2])/(nl*Ln))/(L[2]/Ln);c=[c[0]*sh,c[1]*sh,c[2]*sh];}
+    d[o]=Math.min(255,c[0]);d[o+1]=Math.min(255,c[1]);d[o+2]=Math.min(255,c[2]);d[o+3]=255;
+  }
+  cx.putImageData(img,0,0);
+  const wrap=$('map').parentElement,avail=wrap.clientWidth,maxH=Math.min(window.innerHeight*0.66,640);
+  S.scale=Math.max(1,Math.min(avail/gw,maxH/gh));
+  const cv=$('map'),dpr=window.devicePixelRatio||1,W=gw*S.scale,Hh=gh*S.scale;
+  cv.style.width=W+'px';cv.style.height=Hh+'px';cv.width=Math.round(W*dpr);cv.height=Math.round(Hh*dpr);
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.imageSmoothingEnabled=false;ctx.drawImage(off,0,0,W,Hh);
+  const bar=10/m.cs*S.scale;
+  ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillRect(10,Hh-24,bar+50,16);ctx.fillStyle='#fff';ctx.fillRect(16,Hh-17,bar,2);ctx.font='500 10px '+tok('--f-mono');ctx.fillText('10 cm',22+bar,Hh-12);
+  const acc=tok('--accent'),surf=tok('--surface'),accInk=tok('--accent-ink');
+  const toPx=(xcm,ycm)=>[xcm/m.cs*S.scale,Hh-ycm/m.cs*S.scale];
+  if(S.plan&&S.plan.path){
+    ctx.lineJoin='round';ctx.lineCap='round';ctx.beginPath();
+    S.plan.path.forEach(([x,y],k)=>{const px=(x+.5)*S.scale,py=(gh-1-y+.5)*S.scale;k?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+    ctx.strokeStyle=surf;ctx.lineWidth=Math.max(5,S.scale*.9);ctx.stroke();ctx.strokeStyle=acc;ctx.lineWidth=Math.max(2.5,S.scale*.45);ctx.stroke();
+  }
+  const mark=(pt,l)=>{if(!pt)return;const[x,y]=toPx(pt[0],pt[1]);ctx.beginPath();ctx.arc(x,y,10,0,Math.PI*2);ctx.fillStyle=acc;ctx.fill();ctx.lineWidth=2;ctx.strokeStyle=surf;ctx.stroke();ctx.fillStyle=accInk;ctx.font='600 12px '+tok('--f-body');ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(l,x,y+.5);ctx.textAlign='start';ctx.textBaseline='alphabetic';};
+  mark(S.A,'A');mark(S.B,'B');
+}
+function evtCm(e){const r=$('map').getBoundingClientRect(),m=S.map;return[(e.clientX-r.left)/S.scale*m.cs,(m.gh-(e.clientY-r.top)/S.scale)*m.cs];}
+$('map').addEventListener('pointerdown',e=>{
+  if(!S.map)return;const p=evtCm(e);
+  if(!S.A||S.B){S.A=p;S.B=null;S.plan=Object.assign({},S.plan,{path:null,length_cm:null,climb_cm:null,max_height_cm:null,a_moved_cm:0,b_moved_cm:0});updateRoutePanel();drawMap();setStatus('Now click to set goal B.');}
+  else{S.B=p;refreshMap();}
+});
+const NAMES=['Off surface','Open surface','Small object (drivable)','Obstacle','Keep-out margin'];
+$('map').addEventListener('pointermove',e=>{
+  if(!S.map)return;const m=S.map,[x,y]=evtCm(e);const ix=Math.floor(x/m.cs),iy=Math.floor(y/m.cs);
+  if(ix<0||iy<0||ix>=m.gw||iy>=m.gh)return;const i=iy*m.gw+ix,h=m.H[i];
+  $('hover').textContent='x '+x.toFixed(1)+' cm · y '+y.toFixed(1)+' cm · height '+(h<0?'–':(h/10).toFixed(1)+' cm')+' · '+NAMES[m.C[i]];
+});
+
+/* ---------- simulate ---------- */
+async function simulate(){
+  if(!S.scanId||!S.plan||!S.plan.path)return;
+  S.busy=true;updateRoutePanel();setStatus('Running MuJoCo…','busy');
+  $('overlay').textContent='Running MuJoCo…';$('overlay').hidden=false;
+  const key=simKey();
+  try{
+    const r=await api('/api/simulate',{scan_id:S.scanId,params:paramsBody(),a:S.A,b:S.B,speed:P.speed});
+    S.sim=r;S.simKey=key;
+    showResult(r.result);
+    if(S.view!=='3d')switchView('3d');
+    Viewer.load(r);
+    setStatus(r.result.status==='reached goal'?'Rover reached B in '+r.result.sim_time_s+' s':'Rover '+r.result.status,r.result.status==='reached goal'?'ok':'bad');
+  }catch(e){showErr(e.message);setStatus('Simulation failed.','bad');$('overlay').textContent=e.message;}
+  S.busy=false;updateRoutePanel();markStale();
+}
+function pillClass(st){return st==='reached goal'?'good':st==='timeout'||st==='stuck'?'warn':'bad';}
+function showResult(r){
+  const p=$('resPill');p.textContent=r.status;p.className='pill '+pillClass(r.status);
+  $('sT').textContent=r.sim_time_s.toFixed(1)+' s';
+  $('sD').textContent=r.driven_cm.toFixed(1)+' / '+r.planned_cm.toFixed(1)+' cm';
+  $('sTilt').textContent=r.max_tilt_deg.toFixed(1)+'°';
+  $('sCte').textContent=r.max_tracking_error_cm.toFixed(1)+' cm';
+}
+
+/* ---------- 3D viewer ---------- */
+const Viewer=(function(){
+  const el=$('three');
+  const renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(2,window.devicePixelRatio||1));
+  el.prepend(renderer.domElement);
+  const scene=new THREE.Scene();scene.background=new THREE.Color(0x0e141b);
+  const camera=new THREE.PerspectiveCamera(38,1,0.005,50);
+  const controls=new THREE.OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=0.08;
+  scene.add(new THREE.HemisphereLight(0xeef2fa,0x2e343b,0.8));
+  const sun=new THREE.DirectionalLight(0xffffff,0.55);sun.position.set(-0.6,1.4,0.9);scene.add(sun);
+  const world=new THREE.Group();world.rotation.x=-Math.PI/2;scene.add(world);   // MuJoCo z-up inside
+  const CLS=[0x2b343e,0xd8e0d4,0xe3ac3c,0xc5402c,0xe6bdb2].map(c=>new THREE.Color(c));
+  let dyn=[],rover=null,wheels=[],trail=null,trailIdx=[],frames=[],cum=[],fps=30,result=null,center=new THREE.Vector3();
+  let idx=0,playing=false,speed=1,chase=false,lastT=0;
+
+  function clear(){dyn.forEach(o=>{world.remove(o);o.traverse(n=>{if(n.geometry)n.geometry.dispose();if(n.material)n.material.dispose();});});dyn=[];}
+  function add(o){world.add(o);dyn.push(o);return o;}
+  function toThree(x,y,z){return new THREE.Vector3(x,z,-y);}
+
+  function load(r){
+    clear();
+    const gw=r.gw,gh=r.gh,cs=r.cell_cm/100,E=r.elevation_mm,C=r.classes;
+    // terrain
+    const pos=new Float32Array(gw*gh*3),col=new Float32Array(gw*gh*3);
+    for(let y=0;y<gh;y++)for(let x=0;x<gw;x++){const i=y*gw+x;pos[3*i]=(x+.5)*cs;pos[3*i+1]=(y+.5)*cs;pos[3*i+2]=E[i]/1000;const c=CLS[C[i]];col[3*i]=c.r;col[3*i+1]=c.g;col[3*i+2]=c.b;}
+    const idxs=[];for(let y=0;y<gh-1;y++)for(let x=0;x<gw-1;x++){const a=y*gw+x,b=a+1,c=a+gw,d=c+1;idxs.push(a,b,d,a,d,c);}
+    const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(pos,3));g.setAttribute('color',new THREE.BufferAttribute(col,3));g.setIndex(idxs);g.computeVertexNormals();
+    add(new THREE.Mesh(g,new THREE.MeshLambertMaterial({vertexColors:true})));
+    const W=gw*cs,H=gh*cs;
+    const floor=add(new THREE.Mesh(new THREE.PlaneGeometry(W*4,H*4),new THREE.MeshLambertMaterial({color:0x1a2129})));floor.position.set(W/2,H/2,-0.002);
+    const grid=add(new THREE.GridHelper(Math.max(W,H)*4,40,0x2c3642,0x222a33));grid.rotation.x=Math.PI/2;grid.position.set(W/2,H/2,-0.001);
+    // route dots
+    const rt=r.route_xyz.filter((_,k)=>k%2===0);
+    const dot=new THREE.InstancedMesh(new THREE.SphereGeometry(0.003,8,6),new THREE.MeshBasicMaterial({color:0x4f74ff}),rt.length);
+    const M=new THREE.Matrix4();rt.forEach((p,k)=>{M.makeTranslation(p[0],p[1],p[2]+0.003);dot.setMatrixAt(k,M);});add(dot);
+    // A / B markers
+    const a=r.route_xyz[0],b=r.route_xyz[r.route_xyz.length-1];
+    const disk=(p,rad,color)=>{const m=add(new THREE.Mesh(new THREE.CylinderGeometry(rad,rad,0.003,24),new THREE.MeshLambertMaterial({color})));m.rotation.x=Math.PI/2;m.position.set(p[0],p[1],p[2]+0.0015);};
+    disk(a,0.009,0x2343c4);disk(b,0.013,0x33bf73);
+    const pole=add(new THREE.Mesh(new THREE.CylinderGeometry(0.0015,0.0015,0.045,8),new THREE.MeshLambertMaterial({color:0x33bf73})));pole.rotation.x=Math.PI/2;pole.position.set(b[0],b[1],b[2]+0.0225);
+    const flag=add(new THREE.Mesh(new THREE.PlaneGeometry(0.02,0.012),new THREE.MeshLambertMaterial({color:0x33bf73,side:THREE.DoubleSide})));flag.rotation.x=Math.PI/2;flag.position.set(b[0]+0.01,b[1],b[2]+0.039);
+    // rover
+    rover=buildRover(r.rover);add(rover);
+    // trail
+    frames=r.frames;fps=r.fps;result=r.result;
+    cum=[0];trailIdx=[];const tp=[];let last=null;
+    for(let k=0;k<frames.length;k++){const f=frames[k];if(k)cum.push(cum[k-1]+Math.hypot(f[1]-frames[k-1][1],f[2]-frames[k-1][2]));
+      if(!last||Math.hypot(f[1]-last[0],f[2]-last[1])>0.004){last=[f[1],f[2]];tp.push([f[1],f[2],f[3]-r.rover.wheel+0.003]);trailIdx.push(k);}}
+    trail=new THREE.InstancedMesh(new THREE.SphereGeometry(0.0024,8,6),new THREE.MeshBasicMaterial({color:0xff8c1a}),Math.max(1,tp.length));
+    tp.forEach((p,k)=>{M.makeTranslation(p[0],p[1],p[2]);trail.setMatrixAt(k,M);});trail.count=0;add(trail);
+    // camera
+    center.copy(toThree(W/2,H/2,r.table_z));
+    const d=Math.max(W,H)*1.15;camera.position.set(center.x,center.y+d*0.78,center.z+d*0.72);controls.target.copy(center);controls.update();
+    $('scrub').max=frames.length-1;$('scrub').disabled=false;$('playBtn').disabled=false;
+    $('hud').hidden=false;$('overlay').hidden=true;
+    idx=0;apply();resize();
+    if(!reduceMotion)play();else{idx=frames.length-1;apply();}
+  }
+  function buildRover(rv){
+    const g=new THREE.Group(),rw=rv.wheel,a=rv.half_base,b=rv.half_track,chl=a+rw*0.3,chw=b-0.009;
+    const box=(sx,sy,sz,color,x,y,z)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(sx,sy,sz),new THREE.MeshLambertMaterial({color}));m.position.set(x,y,z);g.add(m);return m;};
+    box(2*chl,2*chw,0.012,0xeef0f3,0,0,0);
+    box(chl,chw*1.6,0.003,0x1e3373,-chl*0.25,0,0.0072);
+    const mast=new THREE.Mesh(new THREE.CylinderGeometry(0.0025,0.0025,0.024,8),new THREE.MeshLambertMaterial({color:0xcfd3d8}));mast.rotation.x=Math.PI/2;mast.position.set(chl*0.6,0,0.018);g.add(mast);
+    box(0.008,0.018,0.008,0x2343c4,chl*0.6+0.002,0,0.032);
+    wheels=[];
+    [[a,b],[a,-b],[-a,b],[-a,-b]].forEach(([x,y])=>{
+      const w=new THREE.Group();w.position.set(x,y,0);
+      const tire=new THREE.Mesh(new THREE.CylinderGeometry(rw,rw,0.012,24),new THREE.MeshLambertMaterial({color:0x202328}));w.add(tire);
+      const hub=new THREE.Mesh(new THREE.BoxGeometry(rw*1.5,0.0132,0.006),new THREE.MeshLambertMaterial({color:0xb9bec5}));w.add(hub);
+      g.add(w);wheels.push(w);
+    });
+    return g;
+  }
+  const qa=new THREE.Quaternion(),qb=new THREE.Quaternion();
+  function apply(){
+    if(!frames.length)return;
+    const n=frames.length,i0=Math.max(0,Math.min(n-1,Math.floor(idx))),i1=Math.min(n-1,i0+1),f=idx-i0;
+    const A=frames[i0],B=frames[i1];
+    rover.position.set(A[1]+(B[1]-A[1])*f,A[2]+(B[2]-A[2])*f,A[3]+(B[3]-A[3])*f);
+    qa.set(A[5],A[6],A[7],A[4]);qb.set(B[5],B[6],B[7],B[4]);rover.quaternion.copy(qa).slerp(qb,f);
+    wheels.forEach((w,k)=>{w.rotation.y=A[8+k]+(B[8+k]-A[8+k])*f;});
+    // trail
+    let lo=0,hi=trailIdx.length;while(lo<hi){const m=(lo+hi)>>1;if(trailIdx[m]<=idx)lo=m+1;else hi=m;}trail.count=lo;
+    // hud
+    const q=rover.quaternion,tilt=Math.acos(Math.max(-1,Math.min(1,1-2*(q.x*q.x+q.y*q.y))))*180/Math.PI;
+    $('hudT').textContent='t '+A[0].toFixed(1)+' s';$('hudD').textContent='driven '+(cum[i0]*100).toFixed(1)+' cm';$('hudTilt').textContent='tilt '+tilt.toFixed(1)+'°';
+    const end=i0>=n-1-fps*0.98;const hs=$('hudStatus');hs.textContent=end?result.status:'driving';hs.className='pill '+(end?pillClass(result.status):'idle');
+    $('scrub').value=i0;$('timeLbl').textContent=A[0].toFixed(1)+' / '+frames[n-1][0].toFixed(1)+' s';
+  }
+  function play(){if(!frames.length)return;if(idx>=frames.length-1)idx=0;playing=true;$('playBtn').textContent='Pause';lastT=performance.now();}
+  function pause(){playing=false;$('playBtn').textContent=idx>=frames.length-1?'Replay':'Play';}
+  const tmpV=new THREE.Vector3(),camGoal=new THREE.Vector3();
+  function tick(now){
+    requestAnimationFrame(tick);
+    if(S.view!=='3d')return;
+    const dt=Math.min(0.1,(now-lastT)/1000);lastT=now;
+    if(playing&&frames.length){idx+=dt*fps*speed;if(idx>=frames.length-1){idx=frames.length-1;apply();pause();}else apply();}
+    if(chase&&rover){
+      rover.getWorldPosition(tmpV);
+      const q=rover.quaternion,yaw=Math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z));
+      camGoal.set(tmpV.x-Math.cos(yaw)*0.3,tmpV.y+0.16,tmpV.z+Math.sin(yaw)*0.3);
+      camera.position.lerp(camGoal,reduceMotion?1:0.08);camera.lookAt(tmpV);
+    }else controls.update();
+    renderer.render(scene,camera);
+  }
+  function resize(){const w=el.clientWidth,h=el.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+  new ResizeObserver(resize).observe(el);
+  requestAnimationFrame(t=>{lastT=t;tick(t);});
+  $('playBtn').addEventListener('click',()=>playing?pause():play());
+  $('scrub').addEventListener('input',e=>{idx=+e.target.value;pause();apply();});
+  document.querySelectorAll('[data-speed]').forEach(b=>b.addEventListener('click',()=>{speed=+b.dataset.speed;document.querySelectorAll('[data-speed]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));}));
+  function setChase(on){chase=on;controls.enabled=!on;$('camChase').setAttribute('aria-pressed',String(on));$('camOrbit').setAttribute('aria-pressed',String(!on));
+    if(!on&&rover){controls.target.copy(center);const d=camera.position.distanceTo(center);if(d<0.4){const W=Math.max(S.map?S.map.gw:100,S.map?S.map.gh:100)*(S.map?S.map.cs:1)/100*1.15;camera.position.set(center.x,center.y+W*0.78,center.z+W*0.72);}controls.update();}}
+  $('camChase').addEventListener('click',()=>setChase(true));$('camOrbit').addEventListener('click',()=>setChase(false));
+  return{load,resize};
+})();
+
+/* ---------- views & controls ---------- */
+function switchView(v){
+  S.view=v;
+  $('tab3d').setAttribute('aria-selected',String(v==='3d'));$('tabMap').setAttribute('aria-selected',String(v==='map'));
+  $('view3d').hidden=v!=='3d';$('viewMap').hidden=v!=='map';
+  if(v==='map')drawMap();else Viewer.resize();
+}
+$('tab3d').addEventListener('click',()=>switchView('3d'));
+$('tabMap').addEventListener('click',()=>switchView('map'));
+function pickBuiltin(id){S.builtin=id;S.file=null;$('bOur').setAttribute('aria-pressed',String(id==='our_table'));$('bSample').setAttribute('aria-pressed',String(id==='sample'));loadScan();}
+$('bOur').addEventListener('click',()=>pickBuiltin('our_table'));
+$('bSample').addEventListener('click',()=>pickBuiltin('sample'));
+$('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;S.file=f;$('bOur').setAttribute('aria-pressed','false');$('bSample').setAttribute('aria-pressed','false');e.target.value='';switchView('map');loadScan();});
+$('units').addEventListener('change',e=>{S.units=e.target.value;loadScan();});
+$('flipBtn').addEventListener('click',()=>{S.flip=!S.flip;loadScan();});
+$('autoBtn').addEventListener('click',()=>{S.A=S.B=null;refreshMap();});
+$('swapBtn').addEventListener('click',()=>{if(S.A&&S.B){[S.A,S.B]=[S.B,S.A];refreshMap();}});
+$('simBtn').addEventListener('click',simulate);
+const fmt={step:v=>(+v).toFixed(1)+' cm',tilt:v=>v+'°',radius:v=>(+v).toFixed(1)+' cm',penalty:v=>+v===0?'off':(+v).toFixed(1),speed:v=>v+' cm/s'};
+let deb=null;
+['step','tilt','radius','penalty','speed'].forEach(id=>{
+  const el=$(id),out=$(id+'O');out.textContent=fmt[id](el.value);
+  el.addEventListener('input',()=>{P[id]=+el.value;out.textContent=fmt[id](el.value);
+    if(id==='speed'){markStale();return;}
+    clearTimeout(deb);deb=setTimeout(refreshMap,180);});
+});
+window.addEventListener('resize',()=>{if(S.view==='map')drawMap();});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',drawMap);
+
+loadScan();
+})();
+</script>
+</body>
+</html>

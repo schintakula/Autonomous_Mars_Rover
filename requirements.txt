@@ -1,0 +1,10 @@
+mujoco>=3.1
+numpy
+scipy
+imageio
+pillow
+fastapi
+uvicorn[standard]
+python-multipart
+# only needed for rover_sim.py video export:
+imageio-ffmpeg
